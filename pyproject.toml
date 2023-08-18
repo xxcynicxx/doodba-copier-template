@@ -11,7 +11,7 @@ plumbum = "^1.8.0"
 python = "^3.7"
 
 [tool.poetry.dev-dependencies]
-black = "^20.8b1"
+black = "^22.12"
 docker-compose = "^1.29.2"
 flake8 = "^4.0.1"
 invoke = "^1.7.3"
