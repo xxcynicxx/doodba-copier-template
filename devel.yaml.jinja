@@ -1,0 +1,134 @@
+{%- import "_macros.jinja" as macros -%}
+{% set whitelisted_hosts = (
+  "cdnjs.cloudflare.com",
+  "fonts.googleapis.com",
+  "fonts.gstatic.com",
+  "www.google.com",
+  "www.googleapis.com",
+  "www.gravatar.com",
+) -%}
+version: "2.4"
+
+services:
+  odoo_proxy:
+    image: ghcr.io/tecnativa/docker-whitelist:latest
+    depends_on:
+      - odoo
+    networks: &public
+      default:
+      public:
+    ports:
+      - "127.0.0.1:{{ macros.version_major(odoo_version) }}899:6899"
+      - "127.0.0.1:{{ macros.version_major(odoo_version) }}069:8069"
+    environment:
+      PORT: "6899 8069"
+      TARGET: odoo
+
+  odoo:
+    extends:
+      file: common.yaml
+      service: odoo
+    build:
+      args:
+        # To aggregate in development, use `setup-devel.yaml`
+        AGGREGATE: "false"
+        # Export these variables to own files created by odoo in your filesystem
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+        # No need for this in development
+        PIP_INSTALL_ODOO: "false"
+        CLEAN: "false"
+        COMPILE: "false"
+    environment:
+      DOODBA_ENVIRONMENT: "${DOODBA_ENVIRONMENT-devel}"
+      LIST_DB: "true"
+      DEBUGPY_ENABLE: "${DOODBA_DEBUGPY_ENABLE:-0}"
+      PGDATABASE: &dbname devel
+      PYTHONDONTWRITEBYTECODE: 1
+      PYTHONOPTIMIZE: ""
+      PYTHONPATH: /opt/odoo/custom/src/odoo
+      SMTP_PORT: "1025"
+      WDB_WEB_PORT: "{{ macros.version_major(odoo_version) }}984"
+      # To avoid installing demo data export DOODBA_WITHOUT_DEMO=all
+      WITHOUT_DEMO: "${DOODBA_WITHOUT_DEMO-false}"
+    volumes:
+      - ./odoo/custom:/opt/odoo/custom:ro,z
+      - ./odoo/auto:/opt/odoo/auto:rw,z
+    depends_on:
+      - db
+      {% for host in whitelisted_hosts -%}
+      - proxy_{{ host|replace(".", "_") }}
+      {% endfor -%}
+      - smtp
+      - wdb
+    command:
+      - odoo
+      - --limit-memory-soft=0
+      {%- if odoo_version >= 10 %}
+      - --limit-time-real-cron=9999999
+      {%- endif %}
+      - --limit-time-real=9999999
+      - --workers=0
+      {%- if odoo_version == 9 %}
+      - --dev
+      {%- elif odoo_version >= 10 %}
+      - --dev=reload,qweb,werkzeug,xml
+      {%- endif %}
+
+  {% if postgres_version -%}
+  db:
+    extends:
+      file: common.yaml
+      service: db
+    environment:
+      POSTGRES_DB: *dbname
+      POSTGRES_PASSWORD: odoopassword
+  {%- endif %}
+
+  pgweb:
+    image: docker.io/sosedoff/pgweb
+    networks: *public
+    ports:
+      - "127.0.0.1:{{ macros.version_major(odoo_version) }}081:8081"
+    environment:
+      DATABASE_URL: postgres://{{ postgres_username }}:odoopassword@db:5432/devel?sslmode=disable
+    depends_on:
+      - db
+
+  smtp:
+    extends:
+      file: common.yaml
+      service: smtpfake
+    networks: *public
+    ports:
+      - "127.0.0.1:{{ macros.version_major(odoo_version) }}025:8025"
+
+  wdb:
+    image: docker.io/kozea/wdb
+    networks: *public
+    ports:
+      - "127.0.0.1:{{ macros.version_major(odoo_version) }}984:1984"
+    # HACK https://github.com/Kozea/wdb/issues/136
+    init: true
+
+  # Whitelist outgoing traffic for tests, reports, etc.
+{%- for host in whitelisted_hosts %}
+  proxy_{{ host|replace(".", "_") }}:
+    image: ghcr.io/tecnativa/docker-whitelist:latest
+    networks:
+      default:
+        aliases:
+          - {{ host }}
+      public:
+    environment:
+      TARGET: {{ host }}
+      PRE_RESOLVE: 1
+{% endfor %}
+networks:
+  default:
+    internal: ${DOODBA_NETWORK_INTERNAL-true}
+  public:
+
+volumes:
+  filestore:
+  db:

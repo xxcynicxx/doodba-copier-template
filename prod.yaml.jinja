@@ -1,0 +1,126 @@
+{%- import "_macros.jinja" as macros -%}
+{%- import "_traefik1_labels.yml.jinja" as traefik1_labels -%}
+{%- import "_traefik2_labels.yml.jinja" as traefik2_labels -%}
+{%- set _key = traefik2_labels.key(project_name, odoo_version, "prod") -%}
+version: "2.4"
+
+services:
+  odoo:
+    extends:
+      file: common.yaml
+      service: odoo
+    restart: unless-stopped
+    env_file:
+      - .docker/odoo.env
+      - .docker/db-access.env
+    environment:
+      DB_FILTER: "{{ odoo_dbfilter }}"
+      DOODBA_ENVIRONMENT: "${DOODBA_ENVIRONMENT-prod}"
+      INITIAL_LANG: "{{ odoo_initial_lang }}"
+      {%- if smtp_relay_host %}
+      SMTP_SERVER: smtplocal
+      {%- endif %}
+    depends_on:
+      - db
+      {%- if smtp_relay_host %}
+      - smtp
+      {%- endif %}
+    networks:
+      default:
+    {%- if odoo_proxy == "traefik" and domains_prod %}
+      inverseproxy_shared:
+    {%- endif %}
+    labels:
+      doodba.domain.main: {{ macros.first_main_domain(domains_prod)|tojson }}
+      {%- if odoo_proxy == "traefik" and domains_prod %}
+      traefik.enable: "true"
+      {{- traefik1_labels.odoo(domains_prod, paths_without_crawlers) }}
+      {{- traefik2_labels.common_middlewares(_key, cidr_whitelist) }}
+      {{- traefik2_labels.odoo(
+        domains_prod,
+        cidr_whitelist,
+        _key,
+        odoo_version,
+        paths_without_crawlers,
+        project_name,
+      ) }}
+      {%- endif %}
+
+  {% if postgres_version -%}
+  db:
+    extends:
+      file: common.yaml
+      service: db
+    env_file:
+      - .docker/db-creation.env
+    restart: unless-stopped
+    {%- if postgres_exposed %}
+    networks:
+      default:
+      inverseproxy_shared:
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "inverseproxy_shared"
+      {{- traefik2_labels.database(
+        domains_prod,
+        postgres_cidr_whitelist,
+        _key,
+        postgres_exposed_port,
+        project_name,
+      ) }}
+    {%- endif %}
+  {%- endif %}
+
+  {%- if smtp_relay_host %}
+  smtp:
+    extends:
+      file: common.yaml
+      service: smtpreal
+    env_file:
+      - .docker/smtp.env
+    networks:
+      default:
+        aliases:
+          - smtplocal
+    restart: unless-stopped
+  {%- endif %}
+  {%- if backup_dst and postgres_version|int >= 10 %}
+
+  backup:
+    extends:
+      file: common.yaml
+      service: backup
+    env_file:
+      - .docker/backup.env
+      - .docker/db-access.env
+    restart: unless-stopped
+    depends_on:
+      - db
+      {%- if smtp_relay_host %}
+      - smtp
+      {%- endif %}
+  {%- endif %}
+
+networks:
+  default:
+    driver_opts:
+      encrypted: 1
+  {%- if odoo_proxy == "traefik" %}
+
+  inverseproxy_shared:
+    external: true
+  {%- endif %}
+
+volumes:
+  {%- if backup_dst %}
+  backup_cache:
+  {%- endif %}
+  filestore:
+  db:
+  {%- if smtp_relay_host %}
+  mailconfig:
+  maildata:
+  maillogs:
+  maillogssupervisord:
+  mailstate:
+  {%- endif %}

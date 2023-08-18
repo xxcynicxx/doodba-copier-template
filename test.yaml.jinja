@@ -1,0 +1,146 @@
+{%- import "_macros.jinja" as macros -%}
+{%- import "_traefik1_labels.yml.jinja" as traefik1_labels -%}
+{%- import "_traefik2_labels.yml.jinja" as traefik2_labels -%}
+{%- set _key = traefik2_labels.key(project_name, odoo_version, "test") -%}
+version: "2.4"
+
+services:
+  odoo:
+    extends:
+      file: common.yaml
+      service: odoo
+    env_file:
+      - .docker/odoo.env
+      - .docker/db-access.env
+    environment:
+      DOODBA_ENVIRONMENT: "${DOODBA_ENVIRONMENT-test}"
+      # To install demo data export DOODBA_WITHOUT_DEMO=false
+      WITHOUT_DEMO: "${DOODBA_WITHOUT_DEMO-all}"
+      SMTP_PORT: "1025"
+      SMTP_SERVER: smtplocal
+    restart: unless-stopped
+    depends_on:
+      - db
+      - smtp
+    networks:
+      default:
+      globalwhitelist_shared:
+    {%- if odoo_proxy == "traefik" and domains_test %}
+      inverseproxy_shared:
+    {%- endif %}
+    labels:
+      doodba.domain.main: {{ macros.first_main_domain(domains_test)|tojson }}
+      {%- if odoo_proxy == "traefik" and domains_test %}
+      traefik.enable: "true"
+      {{- traefik1_labels.odoo(domains_test, ["/"]) }}
+      {{- traefik2_labels.odoo(
+        domains_test,
+        cidr_whitelist,
+        _key,
+        odoo_version,
+        ["/"],
+        project_name,
+      ) }}
+    {%- endif %}
+    command:
+      - odoo
+      - --workers=2
+      - --max-cron-threads=1
+
+  {% if postgres_version -%}
+  db:
+    extends:
+      file: common.yaml
+      service: db
+    env_file:
+      - .docker/db-creation.env
+    restart: unless-stopped
+  {%- endif %}
+
+  smtp:
+    extends:
+      file: common.yaml
+      service: smtpfake
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - smtplocal
+    {%- if odoo_proxy == "traefik" and domains_test %}
+      inverseproxy_shared:
+    {%- endif %}
+    labels:
+      doodba.domain.main: {{ macros.first_main_domain(domains_test)|tojson }}
+      {%- if odoo_proxy == "traefik" and domains_test %}
+      traefik.docker.network: "inverseproxy_shared"
+      traefik.enable: "true"
+      {#- Traefik v1 labels #}
+      traefik.frontend.passHostHeader: "true"
+      {%- call(domain_group) macros.domains_loop_grouped(domains_test|rejectattr("redirect_to")|rejectattr("path_prefixes")) %}
+      {{-
+        traefik1_labels.router(
+          prefix="mailhog",
+          index0=domain_group.loop.index0,
+          rule="%s;PathPrefixStrip:/smtpfake/"|format(
+            traefik1_labels.domains_rule(domain_group.hosts),
+          ),
+          entrypoints=domain_group.entrypoints,
+          port=8025,
+        )
+      }}
+      {%- endcall %}
+      {#- Traefik v2 labels #}
+      # Mailhog service
+      traefik.http.middlewares.{{ _key }}-mailhog-stripprefix.stripPrefix.prefixes: /smtpfake/
+      traefik.http.services.{{ _key }}-mailhog.loadbalancer.server.port: 8025
+      {{- traefik2_labels.common_middlewares(_key, cidr_whitelist) }}
+      {%- call(domain_group) macros.domains_loop_grouped(domains_test|rejectattr("redirect_to")|rejectattr("path_prefixes")) %}
+      {#- Remember basic middlewares for this domain group #}
+      {%- set _ns = namespace(basic_middlewares=[]) -%}
+      {%- if cidr_whitelist %}
+        {%- set _ns.basic_middlewares = _ns.basic_middlewares + ["whitelist"] %}
+      {%- endif %}
+      {%- if domain_group.cert_resolver %}
+        {%- set _ns.basic_middlewares = _ns.basic_middlewares + ["addSTS", "forceSecure"] %}
+      {%- endif %}
+      {{-
+        traefik2_labels.router(
+          domain_group=domain_group,
+          key=_key,
+          suffix="mailhog",
+          rule="%s && PathPrefix(`/smtpfake/`)"|format(traefik2_labels.domains_rule(domain_group)),
+          service="mailhog",
+          middlewares=_ns.basic_middlewares + [
+            "buffering",
+            "compress",
+            "forbid-crawlers",
+            "mailhog-stripprefix",
+          ],
+        )
+      }}
+      {%- endcall %}
+      {%- endif %}
+    volumes:
+      - "smtpconf:/etc/mailhog:ro,z"
+    entrypoint: [sh, -c]
+    command:
+      - test -r /etc/mailhog/auth && export MH_AUTH_FILE=/etc/mailhog/auth; exec MailHog
+
+networks:
+  default:
+    internal: ${DOODBA_NETWORK_INTERNAL-true}
+    driver_opts:
+      encrypted: 1
+
+  globalwhitelist_shared:
+    external: true
+  {%- if odoo_proxy == "traefik" %}
+
+  inverseproxy_shared:
+    external: true
+  {%- endif %}
+
+volumes:
+  filestore:
+  db:
+  smtpconf:

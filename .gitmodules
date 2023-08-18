@@ -1,0 +1,4 @@
+[submodule "vendor/oca-addons-repo-template"]
+	path = vendor/oca-addons-repo-template
+	url = https://github.com/OCA/oca-addons-repo-template.git
+	branch = master
